@@ -35,8 +35,7 @@ static DATA: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 fn grab(conn: &RustConnection, win_id: u32, time: u32) -> Result<(), Box<dyn Error>> {
     if conn.get_selection_owner(*CLIPBOARD.wait())?.reply()?.owner == x11rb::NONE {
         println!("Claiming ownership of unowned clipboard");
-        conn.set_selection_owner(win_id, *CLIPBOARD.wait(), time)?
-            .check()?;
+        conn.set_selection_owner(win_id, *CLIPBOARD.wait(), time)?.check()?;
         return Ok(());
     }
 
@@ -80,23 +79,19 @@ fn grab(conn: &RustConnection, win_id: u32, time: u32) -> Result<(), Box<dyn Err
 
                     if *INTRUSIVE.wait() {
                         println!("taking ownership of clipboard");
-                        conn.delete_property(win_id, *GHOSTCLIP_PROPERTY.wait())?
-                            .check()?;
-                        conn.set_selection_owner(win_id, *CLIPBOARD.wait(), time)?
-                            .check()?;
+                        conn.delete_property(win_id, *GHOSTCLIP_PROPERTY.wait())?.check()?;
+                        conn.set_selection_owner(win_id, *CLIPBOARD.wait(), time)?.check()?;
                     }
 
                     conn.flush()?;
                 }
             }
-            _ => {
-                conn.flush()?;
-            }
+            _ => conn.flush()?,
         }
         event_option = conn.poll_for_event()?;
     }
 
-    return Ok(());
+    Ok(())
 }
 
 fn deny(conn: &RustConnection, event: &SelectionRequestEvent) -> Result<(), Box<dyn Error>> {
@@ -110,8 +105,7 @@ fn deny(conn: &RustConnection, event: &SelectionRequestEvent) -> Result<(), Box<
         ..Default::default()
     };
 
-    conn.send_event(true, event.requestor, EventMask::NO_EVENT, fevent)?
-        .check()?;
+    conn.send_event(true, event.requestor, EventMask::NO_EVENT, fevent)?.check()?;
 
     conn.flush()?;
 
@@ -142,8 +136,7 @@ fn fulfill(conn: &RustConnection, event: &SelectionRequestEvent) -> Result<(), B
         ..Default::default()
     };
 
-    conn.send_event(true, event.requestor, EventMask::NO_EVENT, fevent)?
-        .check()?;
+    conn.send_event(true, event.requestor, EventMask::NO_EVENT, fevent)?.check()?;
 
     Ok(())
 }
@@ -155,17 +148,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (conn, screen_num) = x11rb::connect(None)?;
 
-    INCR.set(conn.intern_atom(false, b"INCR")?.reply()?.atom)
-        .unwrap();
-    CLIPBOARD
-        .set(conn.intern_atom(false, b"CLIPBOARD")?.reply()?.atom)
-        .unwrap();
-    UTF8_STRING
-        .set(conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom)
-        .unwrap();
-    GHOSTCLIP_PROPERTY
-        .set(conn.intern_atom(false, b"GHOSTCLIP")?.reply()?.atom)
-        .unwrap();
+    INCR.set(conn.intern_atom(false, b"INCR")?.reply()?.atom).unwrap();
+    CLIPBOARD.set(conn.intern_atom(false, b"CLIPBOARD")?.reply()?.atom).unwrap();
+    UTF8_STRING.set(conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom).unwrap();
+    GHOSTCLIP_PROPERTY.set(conn.intern_atom(false, b"GHOSTCLIP")?.reply()?.atom).unwrap();
 
     let screen = &conn.setup().roots[screen_num];
 
@@ -232,9 +218,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         fulfill(&conn, &event)?;
                     }
                 }
-                _ => {
-                    conn.flush()?;
-                }
+                _ => conn.flush()?,
             }
 
             event_option = conn.poll_for_event()?;
