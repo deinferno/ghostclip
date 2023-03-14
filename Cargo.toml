@@ -1,6 +1,6 @@
 [package]
 name = "ghostclip"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["deinferno <14363193+deinferno@users.noreply.github.com>"]
 
@@ -9,4 +9,3 @@ authors = ["deinferno <14363193+deinferno@users.noreply.github.com>"]
 [dependencies]
 x11rb = {version="0.11.1",features = ["xfixes"]}
 once_cell = "1.17.1"
-clap = { version = "4.1.8", features = ["derive"] }

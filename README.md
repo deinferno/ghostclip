@@ -14,12 +14,11 @@ uses passive mode via Xfixes.
 Most clip managers got too much features and dependencies or don't handle clipboard proxying.
 
 So after finding `xclipd` it was doing most of things i need but it was too intrusive
-and broke other clipboard mimes, so i decided to "meme" rewrite it to rust and add 
-support for xfixes selection events.
+and broke other clipboard mimes, so i decided to "meme" rewrite it to rust and use xfixes selection events.
 
 ## How it works
 
-Almost the same as `xclipd` but doesn't take ownership of clipboard by default.
+Almost the same as `xclipd` but doesn't take ownership of clipboard if original owner is still around.
 
 ## Building
 

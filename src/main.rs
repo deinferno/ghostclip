@@ -1,30 +1,18 @@
 use std::error::Error;
 use std::sync::Mutex;
 
-use clap::Parser;
-
 use once_cell::sync::OnceCell;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xfixes::{ConnectionExt as XFixesConnectionExt, SelectionEventMask};
 use x11rb::protocol::xproto::{
-    Atom, ConnectionExt, CreateWindowAux, EventMask, GetPropertyType, PropMode,
+    Atom, ConnectionExt, CreateWindowAux, EventMask, GetPropertyType, PropMode, Property,
     SelectionNotifyEvent, SelectionRequestEvent, WindowClass, SELECTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::CURRENT_TIME;
 
-/// Simple program to preserve clipboard text after window is closed
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Forcefully grab ownership of clipboard data (doesn't require Xfixes)
-    #[arg(short, long, default_value_t = false)]
-    intrusive: bool,
-}
-
-static INTRUSIVE: OnceCell<bool> = OnceCell::new();
 static INCR: OnceCell<Atom> = OnceCell::new();
 static CLIPBOARD: OnceCell<Atom> = OnceCell::new();
 static UTF8_STRING: OnceCell<Atom> = OnceCell::new();
@@ -32,9 +20,47 @@ static GHOSTCLIP_PROPERTY: OnceCell<Atom> = OnceCell::new();
 
 static DATA: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
+fn flush_incr(conn: &RustConnection, win_id: u32) -> Result<(), Box<dyn Error>> {
+    print!("INCR detected (data is too large), flushing");
+
+    // Removing data anyway
+    *DATA.lock()? = vec![];
+
+    conn.delete_property(win_id, *GHOSTCLIP_PROPERTY.wait())?.check()?;
+
+    loop {
+        let event = conn.wait_for_event()?;
+        let mut event_option = Some(event);
+        while let Some(event) = event_option {
+            match event {
+                Event::PropertyNotify(event) if event.state == Property::NEW_VALUE => {
+                    print!(".");
+                    let property = conn
+                        .get_property(
+                            true,
+                            win_id,
+                            *GHOSTCLIP_PROPERTY.wait(),
+                            GetPropertyType::ANY,
+                            0,
+                            u32::MAX,
+                        )?
+                        .reply()?;
+
+                    if property.length == 0 {
+                        println!("Done");
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+            event_option = conn.poll_for_event()?;
+        }
+    }
+}
+
 fn grab(conn: &RustConnection, win_id: u32, time: u32) -> Result<(), Box<dyn Error>> {
     if conn.get_selection_owner(*CLIPBOARD.wait())?.reply()?.owner == x11rb::NONE {
-        println!("Claiming ownership of unowned clipboard");
+        println!("Claiming unowned clipboard");
         conn.set_selection_owner(win_id, *CLIPBOARD.wait(), time)?.check()?;
         return Ok(());
     }
@@ -48,50 +74,51 @@ fn grab(conn: &RustConnection, win_id: u32, time: u32) -> Result<(), Box<dyn Err
     )?
     .check()?;
 
-    conn.flush()?;
-
     let event = conn.wait_for_event()?;
     let mut event_option = Some(event);
     while let Some(event) = event_option {
         match event {
             Event::SelectionNotify(event) => {
                 if event.property != x11rb::NONE {
-                    let property = conn
+                    let probe_property = conn
                         .get_property(
                             false,
                             win_id,
                             *GHOSTCLIP_PROPERTY.wait(),
                             GetPropertyType::ANY,
                             0,
-                            u32::MAX,
+                            0,
                         )?
                         .reply()?;
 
-                    if property.type_ == *INCR.wait() {
-                        println!("INCR handling not implemented");
-                        conn.flush()?;
-                        return Ok(());
+                    if probe_property.type_ == *INCR.wait() {
+                        return flush_incr(conn, win_id);
                     }
 
-                    println!("Copying clipboard text");
+                    let property = conn
+                        .get_property(
+                            true,
+                            win_id,
+                            *GHOSTCLIP_PROPERTY.wait(),
+                            GetPropertyType::ANY,
+                            0,
+                            probe_property.bytes_after,
+                        )?
+                        .reply()?;
+
+                    println!("Storing clipboard");
 
                     *DATA.lock()? = property.value;
 
-                    if *INTRUSIVE.wait() {
-                        println!("taking ownership of clipboard");
-                        conn.delete_property(win_id, *GHOSTCLIP_PROPERTY.wait())?.check()?;
-                        conn.set_selection_owner(win_id, *CLIPBOARD.wait(), time)?.check()?;
-                    }
-
-                    conn.flush()?;
+                    return Ok(());
                 }
             }
-            _ => conn.flush()?,
+            _ => {}
         }
         event_option = conn.poll_for_event()?;
     }
 
-    Ok(())
+    return Ok(());
 }
 
 fn deny(conn: &RustConnection, event: &SelectionRequestEvent) -> Result<(), Box<dyn Error>> {
@@ -106,8 +133,6 @@ fn deny(conn: &RustConnection, event: &SelectionRequestEvent) -> Result<(), Box<
     };
 
     conn.send_event(true, event.requestor, EventMask::NO_EVENT, fevent)?.check()?;
-
-    conn.flush()?;
 
     Ok(())
 }
@@ -142,10 +167,6 @@ fn fulfill(conn: &RustConnection, event: &SelectionRequestEvent) -> Result<(), B
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
-
-    INTRUSIVE.set(args.intrusive).unwrap();
-
     let (conn, screen_num) = x11rb::connect(None)?;
 
     INCR.set(conn.intern_atom(false, b"INCR")?.reply()?.atom).unwrap();
@@ -157,7 +178,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let win_id = conn.generate_id()?;
 
-    let win_aux = CreateWindowAux::new();
+    let win_aux =
+        CreateWindowAux::new().event_mask(EventMask::NO_EVENT | EventMask::PROPERTY_CHANGE);
 
     conn.create_window(
         screen.root_depth,
@@ -174,19 +196,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?
     .check()?;
 
-    if !*INTRUSIVE.wait() {
-        conn.query_extension(b"XFIXES")?.reply()?;
-        conn.xfixes_query_version(5, 0)?.reply()?;
-        conn.xfixes_select_selection_input(
-            win_id,
-            *CLIPBOARD.wait(),
-            SelectionEventMask::SET_SELECTION_OWNER
-                | SelectionEventMask::SELECTION_WINDOW_DESTROY
-                | SelectionEventMask::SELECTION_CLIENT_CLOSE,
-        )?
-        .check()?;
-        conn.flush()?;
-    }
+    conn.query_extension(b"XFIXES")?.reply()?;
+    conn.xfixes_query_version(5, 0)?.reply()?;
+    conn.xfixes_select_selection_input(
+        win_id,
+        *CLIPBOARD.wait(),
+        SelectionEventMask::SET_SELECTION_OWNER
+            | SelectionEventMask::SELECTION_WINDOW_DESTROY
+            | SelectionEventMask::SELECTION_CLIENT_CLOSE,
+    )?
+    .check()?;
 
     grab(&conn, win_id, CURRENT_TIME)?;
 
@@ -195,16 +214,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut event_option = Some(event);
         while let Some(event) = event_option {
             match event {
-                Event::XfixesSelectionNotify(event) if !*INTRUSIVE.wait() => {
-                    println!("Handling Xfixes SelectionNotify");
+                Event::XfixesSelectionNotify(event) => {
+                    println!("Handling XfixesSelectionNotify");
                     grab(&conn, win_id, event.timestamp)?;
                 }
                 Event::SelectionNotify(event) => {
                     println!("Handling SelectionNotify");
-                    grab(&conn, win_id, event.time)?;
-                }
-                Event::SelectionClear(event) => {
-                    println!("Handling selection clear");
                     grab(&conn, win_id, event.time)?;
                 }
                 Event::SelectionRequest(event) => {
@@ -214,11 +229,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     {
                         deny(&conn, &event)?;
                     } else {
-                        println!("Providing clipboard text");
+                        println!("Providing clipboard");
                         fulfill(&conn, &event)?;
                     }
                 }
-                _ => conn.flush()?,
+                _ => {}
             }
 
             event_option = conn.poll_for_event()?;
